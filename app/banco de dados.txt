@@ -1,0 +1,208 @@
+-- Create enum types for status
+CREATE TYPE public.vehicle_status AS ENUM ('active', 'inactive', 'maintenance');
+CREATE TYPE public.equipment_status AS ENUM ('available', 'in_use', 'maintenance', 'broken');
+CREATE TYPE public.maintenance_status AS ENUM ('pending', 'in_progress', 'completed', 'cancelled');
+CREATE TYPE public.maintenance_priority AS ENUM ('low', 'medium', 'high', 'urgent');
+
+-- Create profiles table
+CREATE TABLE public.profiles (
+  id UUID PRIMARY KEY REFERENCES auth.users(id) ON DELETE CASCADE,
+  email TEXT,
+  full_name TEXT,
+  avatar_url TEXT,
+  created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW() NOT NULL,
+  updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW() NOT NULL
+);
+
+-- Create vehicles table
+CREATE TABLE public.vehicles (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id UUID REFERENCES public.profiles(id) ON DELETE CASCADE NOT NULL,
+  plate TEXT NOT NULL,
+  brand TEXT NOT NULL,
+  model TEXT NOT NULL,
+  year INTEGER NOT NULL,
+  color TEXT,
+  chassis TEXT,
+  renavam TEXT,
+  status public.vehicle_status DEFAULT 'active' NOT NULL,
+  notes TEXT,
+  created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW() NOT NULL,
+  updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW() NOT NULL
+);
+
+-- Create equipments table
+CREATE TABLE public.equipments (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id UUID REFERENCES public.profiles(id) ON DELETE CASCADE NOT NULL,
+  vehicle_id UUID REFERENCES public.vehicles(id) ON DELETE SET NULL,
+  name TEXT NOT NULL,
+  brand TEXT NOT NULL,
+  model TEXT,
+  serial_number TEXT,
+  status public.equipment_status DEFAULT 'available' NOT NULL,
+  purchase_date DATE,
+  warranty_expiry DATE,
+  location TEXT,
+  notes TEXT,
+  created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW() NOT NULL,
+  updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW() NOT NULL
+);
+
+-- Create maintenance table
+CREATE TABLE public.maintenance (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id UUID REFERENCES public.profiles(id) ON DELETE CASCADE NOT NULL,
+  vehicle_id UUID REFERENCES public.vehicles(id) ON DELETE CASCADE,
+  equipment_id UUID REFERENCES public.equipments(id) ON DELETE CASCADE,
+  title TEXT NOT NULL,
+  description TEXT,
+  status public.maintenance_status DEFAULT 'pending' NOT NULL,
+  priority public.maintenance_priority DEFAULT 'medium' NOT NULL,
+  scheduled_date TIMESTAMP WITH TIME ZONE,
+  completed_date TIMESTAMP WITH TIME ZONE,
+  cost DECIMAL(10, 2),
+  technician TEXT,
+  notes TEXT,
+  created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW() NOT NULL,
+  updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW() NOT NULL,
+  CONSTRAINT maintenance_target_check CHECK (
+    (vehicle_id IS NOT NULL AND equipment_id IS NULL) OR
+    (vehicle_id IS NULL AND equipment_id IS NOT NULL)
+  )
+);
+
+-- Enable Row Level Security
+ALTER TABLE public.profiles ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.vehicles ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.equipments ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.maintenance ENABLE ROW LEVEL SECURITY;
+
+-- Create RLS Policies for profiles
+CREATE POLICY "Users can view their own profile"
+  ON public.profiles FOR SELECT
+  USING (auth.uid() = id);
+
+CREATE POLICY "Users can update their own profile"
+  ON public.profiles FOR UPDATE
+  USING (auth.uid() = id);
+
+-- Create RLS Policies for vehicles
+CREATE POLICY "Users can view their own vehicles"
+  ON public.vehicles FOR SELECT
+  USING (auth.uid() = user_id);
+
+CREATE POLICY "Users can insert their own vehicles"
+  ON public.vehicles FOR INSERT
+  WITH CHECK (auth.uid() = user_id);
+
+CREATE POLICY "Users can update their own vehicles"
+  ON public.vehicles FOR UPDATE
+  USING (auth.uid() = user_id);
+
+CREATE POLICY "Users can delete their own vehicles"
+  ON public.vehicles FOR DELETE
+  USING (auth.uid() = user_id);
+
+-- Create RLS Policies for equipments
+CREATE POLICY "Users can view their own equipments"
+  ON public.equipments FOR SELECT
+  USING (auth.uid() = user_id);
+
+CREATE POLICY "Users can insert their own equipments"
+  ON public.equipments FOR INSERT
+  WITH CHECK (auth.uid() = user_id);
+
+CREATE POLICY "Users can update their own equipments"
+  ON public.equipments FOR UPDATE
+  USING (auth.uid() = user_id);
+
+CREATE POLICY "Users can delete their own equipments"
+  ON public.equipments FOR DELETE
+  USING (auth.uid() = user_id);
+
+-- Create RLS Policies for maintenance
+CREATE POLICY "Users can view their own maintenance records"
+  ON public.maintenance FOR SELECT
+  USING (auth.uid() = user_id);
+
+CREATE POLICY "Users can insert their own maintenance records"
+  ON public.maintenance FOR INSERT
+  WITH CHECK (auth.uid() = user_id);
+
+CREATE POLICY "Users can update their own maintenance records"
+  ON public.maintenance FOR UPDATE
+  USING (auth.uid() = user_id);
+
+CREATE POLICY "Users can delete their own maintenance records"
+  ON public.maintenance FOR DELETE
+  USING (auth.uid() = user_id);
+
+-- Create function to update updated_at timestamp
+CREATE OR REPLACE FUNCTION public.handle_updated_at()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+BEGIN
+  NEW.updated_at = NOW();
+  RETURN NEW;
+END;
+$$;
+
+-- Create triggers for updated_at
+CREATE TRIGGER set_updated_at
+  BEFORE UPDATE ON public.profiles
+  FOR EACH ROW
+  EXECUTE FUNCTION public.handle_updated_at();
+
+CREATE TRIGGER set_updated_at
+  BEFORE UPDATE ON public.vehicles
+  FOR EACH ROW
+  EXECUTE FUNCTION public.handle_updated_at();
+
+CREATE TRIGGER set_updated_at
+  BEFORE UPDATE ON public.equipments
+  FOR EACH ROW
+  EXECUTE FUNCTION public.handle_updated_at();
+
+CREATE TRIGGER set_updated_at
+  BEFORE UPDATE ON public.maintenance
+  FOR EACH ROW
+  EXECUTE FUNCTION public.handle_updated_at();
+
+-- Create function to handle new user signup
+CREATE OR REPLACE FUNCTION public.handle_new_user()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+BEGIN
+  INSERT INTO public.profiles (id, email, full_name)
+  VALUES (
+    NEW.id,
+    NEW.email,
+    COALESCE(NEW.raw_user_meta_data->>'full_name', NEW.email)
+  );
+  RETURN NEW;
+END;
+$$;
+
+-- Create trigger for new user signup
+CREATE TRIGGER on_auth_user_created
+  AFTER INSERT ON auth.users
+  FOR EACH ROW
+  EXECUTE FUNCTION public.handle_new_user();
+
+-- Create indexes for better performance
+CREATE INDEX idx_vehicles_user_id ON public.vehicles(user_id);
+CREATE INDEX idx_vehicles_status ON public.vehicles(status);
+CREATE INDEX idx_equipments_user_id ON public.equipments(user_id);
+CREATE INDEX idx_equipments_vehicle_id ON public.equipments(vehicle_id);
+CREATE INDEX idx_equipments_status ON public.equipments(status);
+CREATE INDEX idx_maintenance_user_id ON public.maintenance(user_id);
+CREATE INDEX idx_maintenance_vehicle_id ON public.maintenance(vehicle_id);
+CREATE INDEX idx_maintenance_equipment_id ON public.maintenance(equipment_id);
+CREATE INDEX idx_maintenance_status ON public.maintenance(status);
